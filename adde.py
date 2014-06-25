@@ -8,7 +8,7 @@ Created by rayg on 13 Jun 2014.
 Copyright (c) 2014 University of Wisconsin SSEC. All rights reserved.
 """
 
-import sys
+import os, sys
 import logging
 import ctypes as C
 import socket
@@ -91,6 +91,10 @@ AREA_HEADER_FIELDS = (
     ('comment_count', C.c_int32)
 )
 
+TABLE_BPE_TO_TYPE = { 1: C.c_int8,
+                      2: C.c_int16,
+                      4: C.c_int32
+}
 
 def _recv_length_word(sock):
     total_bytes, = struct.unpack('>l', sock._sock.recv(4))
@@ -99,10 +103,12 @@ def _recv_length_word(sock):
 
 def _recv_all(sock, toread, buffer=None):
     # ref http://stackoverflow.com/questions/15962119/using-bytearray-with-socket-recv-into
+    LOG.debug('about to recv %d bytes' % toread)
     buf = buffer if (buffer is not None) else bytearray(toread)
     view = memoryview(buf)
     while toread:
         n_got = sock.recv_into(view, toread)
+        LOG.debug('got %d bytes' % n_got)
         view = view[n_got:]
         toread -= n_got
     return buf
@@ -128,6 +134,10 @@ class adde_header_t(C.BigEndianStructure):
 # aget image requests
 #
 
+def _fields_repr(ctype):
+    from pprint import pformat
+    return pformat(dict( (name, getattr(ctype, name)) for (name,_) in ctype._fields_ ))
+
 
 class adde_preamble_t(C.BigEndianStructure):
     """
@@ -140,6 +150,8 @@ class adde_preamble_t(C.BigEndianStructure):
         ('port', C.c_uint32),
         ('service', C.c_char * 4)
     )
+
+    __repr__ = _fields_repr
 
 class adde_aget_t(C.BigEndianStructure):
     """
@@ -159,6 +171,7 @@ class adde_aget_t(C.BigEndianStructure):
         ('text', C.c_char*120)
     )
 
+    __repr__ = _fields_repr
 
 
 def form_aget(text, host, port, user, project, password, server_inaddr=None, client_inaddr=None):
@@ -245,7 +258,11 @@ def recv_aget(sock):
     assert(aux.length == 0)
 
     data_block_length = total_bytes - header.data_block_offset - (header.comment_count * CARD_SIZE)
-    fields.append( ('image', C.c_int16 * (data_block_length / 2)) )
+    element_typ = TABLE_BPE_TO_TYPE[header.bytes_per_element]
+    assert((data_block_length % header.bytes_per_element)==0)
+    total_elements = data_block_length / header.bytes_per_element
+    assert(total_elements == header.lines * header.elements)
+    fields.append( ('image', (element_typ * header.elements) * header.lines) )
 
     comment_field = ('comments', (C.c_char * CARD_SIZE) * header.comment_count)
     fields.append(comment_field)
@@ -307,13 +324,15 @@ class Session(object):
     port = None
     project = None
     password = None
-    _sock = None
+    # _sock = None
     _server_inaddr = None
     _client_inaddr = None
 
-    def _connect(self):
-        self._sock = s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    def _connect(self, timeout=None):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((self.host, self.port))
+        s.settimeout(timeout)
+        return s
 
 
     def __init__(self, host, port, user, project, password):
@@ -326,13 +345,19 @@ class Session(object):
         self._client_inaddr = inaddr_t.from_buffer_copy(socket.inet_aton(list(socket.gethostbyaddr(socket.gethostname()))[2][0]))
 
 
-    def aget(self, request_string):
+    def aget(self, request_string, timeout=10):
 
         bfr = form_aget(request_string, self.host, self.port, self.user, self.project, self.password,
                         server_inaddr=self._server_inaddr, client_inaddr=self._client_inaddr)
-        self._sock.send(bfr)
-        return recv_aget(self.sock)
+        LOG.debug(repr(bfr))
+        s = self._connect(timeout)
+        s.send(bfr)
+        zult = recv_aget(s)
+        s.close()
+        return zult
 
+TEST_REQ_STRING = ("EASTL FD -1 EC 45 90 X 480 640 STYPE=VISR BAND= 1 TRACE=0 TIME="
+                       "X X I SPAC=1 UNIT=BRIT AUX=YES NAV= DAY= DOC=NO VERSION=1")
 
 
 def _test_request():
@@ -341,26 +366,41 @@ def _test_request():
     od -t x1 /tmp/request.bin
     :return:
     """
-
-    req_string = ("EASTL FD -1 EC 45 90 X 480 640 STYPE=VISR BAND= 1 TRACE=0 TIME="
-                  "X X I SPAC=1 UNIT=BRIT AUX=YES NAV= DAY= DOC=NO VERSION=1")
-
-    return form_aget(req_string,
+    req = form_aget(TEST_REQ_STRING,
                      'eastl.ssec.wisc.edu',
                      112,
                      'RKG',
                      6999,
                      '')
+    with open('/tmp/request.bin', 'wb') as fp:
+        fp.write(req)
+    return req
 
+
+def _test_smoke():
+    logging.basicConfig(level=logging.DEBUG)
+    ses = Session('eastl.ssec.wisc.edu',
+                       112,
+                       'RKG',
+                       6999,
+                       '')
+    return ses.aget(TEST_REQ_STRING)
 
 
 class test_adde(unittest.TestCase):
+    ses = None
     def setUp(self):
         # FUTURE: consolidate test patterns where we can build them into here, then knock them down later
-        pass
+        self.ses = Session('eastl.ssec.wisc.edu',
+                           112,
+                           'RKG',
+                           6999,
+                           '')
 
     def test_aget(self):
-        pass
+        zult = self.ses.aget(TEST_REQ_STRING)
+        return zult
+
 
 
 
@@ -372,8 +412,8 @@ def main():
 Doesn't actually do anything.
 """
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument('-t', '--test', dest="self_test",
-                        action="store_true", default=False, help="run self-tests")
+    # parser.add_argument('-t', '--test', dest="self_test",
+    #                     action="store_true", default=False, help="run self-tests")
     parser.add_argument('-v', '--verbose', dest='verbosity', action="count", default=0,
                         help='each occurrence increases verbosity 1 level through ERROR-WARNING-INFO-DEBUG')
     # http://docs.python.org/2.7/library/argparse.html#nargs
@@ -384,24 +424,25 @@ Doesn't actually do anything.
     args = parser.parse_args()
 
 
-    if args.self_test:
-        # FIXME - run any self-tests
-        # import doctest
-        # doctest.testmod()
-        return 2
-
+    if not args.pos_args:
+        unittest.main()
+        return 0
 
     levels = [logging.ERROR, logging.WARN, logging.INFO, logging.DEBUG]
-    logging.basicConfig(level=levels[min(3, args.verbosity)])
+    if 'DEBUG' in os.environ:
+        verb = 3
+    else:
+        verb = args.verbosity
+    logging.basicConfig(level=levels[min(3, verb)])
 
 
-    if not args.pos_args:
-        print("running _test_request, writing request to /tmp/request.bin (next try 'od -t x1 /tmp/request.bin')")
-        req = _test_request()
-        with open('/tmp/request.bin', 'wb') as fp:
-            fp.write(req)
-        parser.error("incorrect arguments, try -h or --help.")
-        return 9
+    # if not args.pos_args:
+    #     print("running _test_request, writing request to /tmp/request.bin (next try 'od -t x1 /tmp/request.bin')")
+    #     req = _test_request()
+    #     with open('/tmp/request.bin', 'wb') as fp:
+    #         fp.write(req)
+    #     parser.error("incorrect arguments, try -h or --help.")
+    #     return 9
 
     # FIXME - main() logic code here
     return 0
