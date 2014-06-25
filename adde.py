@@ -106,11 +106,15 @@ def _recv_all(sock, toread, buffer=None):
     LOG.debug('about to recv %d bytes' % toread)
     buf = buffer if (buffer is not None) else bytearray(toread)
     view = memoryview(buf)
-    while toread:
+    while toread>0:
         n_got = sock.recv_into(view, toread)
+        if n_got==0:
+            break
         LOG.debug('got %d bytes' % n_got)
         view = view[n_got:]
         toread -= n_got
+    if toread!=0:
+        raise IOError('expecting %d more bytes' % toread)
     return buf
 
 
@@ -345,7 +349,7 @@ class Session(object):
         self._client_inaddr = inaddr_t.from_buffer_copy(socket.inet_aton(list(socket.gethostbyaddr(socket.gethostname()))[2][0]))
 
 
-    def aget(self, request_string, timeout=10):
+    def aget(self, request_string, timeout=32):
 
         bfr = form_aget(request_string, self.host, self.port, self.user, self.project, self.password,
                         server_inaddr=self._server_inaddr, client_inaddr=self._client_inaddr)
