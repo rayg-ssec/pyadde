@@ -97,7 +97,7 @@ TABLE_BPE_TO_TYPE = { 1: C.c_int8,
 }
 
 def _recv_length_word(sock):
-    total_bytes, = struct.unpack('>l', sock._sock.recv(4))
+    total_bytes, = struct.unpack('!l', sock.recv(4))
     return total_bytes
 
 
@@ -109,6 +109,7 @@ def _recv_all(sock, toread, buffer=None):
     while toread>0:
         n_got = sock.recv_into(view, toread)
         if n_got==0:
+            LOG.error('socket returned no data but waiting for %d more' % toread)
             break
         LOG.debug('got %d bytes' % n_got)
         view = view[n_got:]
@@ -127,7 +128,7 @@ class area_header_t(C.Structure):
 
 
 class adde_header_t(C.BigEndianStructure):
-    """an area header received over an ADDE socket
+    """an area header received over an ADDE socket, i.e. network byte order
     """
     _pack_ = 1
     _fields_ = AREA_HEADER_FIELDS
@@ -197,17 +198,17 @@ def form_aget(text, host, port, user, project, password, server_inaddr=None, cli
     req = adde_aget_t()
     req.preamble.version = 1
     req.preamble.server_address = server
-    req.preamble.port = port
+    req.preamble.port = 1 # port FIXME?????
     req.preamble.service = 'AGET'
 
     req.server_address = server
     req.server_port = port
-    req.client_address[:] = client
+    req.client_address = client
     req.user = user.ljust(4,' ')
     req.project = project
-    req.password = password.ljust(12,' ')
+    req.password = password.ljust(12, '\0')
     req.service = 'AGET'
-    req.input_length = len(text)
+    req.input_length = 0 # len(text) FIXME?????
     req.text = text.ljust(120, ' ')
 
     return req
@@ -252,11 +253,11 @@ def recv_aget(sock):
 
     if nav.length > 0:
         # FIXME for now just put in a block of characters - eventually this is a separate structure
-        fields.append(('_nav_raw', C.c_char * nav.length))
+        fields.append(('_nav_raw', C.c_byte * nav.length))
 
     if cal.length > 0:
         # FIXME for now a placeholder for a set of cal fields
-        fields.append(('_cal_raw', C.c_char * cal.length))
+        fields.append(('_cal_raw', C.c_byte * cal.length))
 
     # FIXME add aux handling - for now just error out if somebody slips us some aux or cal
     assert(aux.length == 0)
@@ -349,12 +350,13 @@ class Session(object):
         self._client_inaddr = inaddr_t.from_buffer_copy(socket.inet_aton(list(socket.gethostbyaddr(socket.gethostname()))[2][0]))
 
 
-    def aget(self, request_string, timeout=32):
+    def aget(self, request_string, timeout=None):
 
         bfr = form_aget(request_string, self.host, self.port, self.user, self.project, self.password,
                         server_inaddr=self._server_inaddr, client_inaddr=self._client_inaddr)
-        LOG.debug(repr(bfr))
+        LOG.debug(repr(bfr))            
         s = self._connect(timeout)
+        # bfr = open('/tmp/nomc.bin', 'rb').read()
         s.send(bfr)
         zult = recv_aget(s)
         s.close()

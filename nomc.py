@@ -209,7 +209,7 @@ remote_host = 'eastl.ssec.wisc.edu'
 remote_port = 112
 request_type = "AGET"
 
-initials = "KJH"
+initials = "RKG"
 padded_initials = initials.ljust(4, ' ')
 project_number = 6999
 
@@ -237,7 +237,11 @@ pack += struct.pack('!120s', padded_req_string)
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.connect((remote_host, remote_port))
 s.send(pack)
+with open('/tmp/nomc.bin', 'wb') as fp:
+    fp.write(pack)
 recv_length = list(struct.unpack('!l', s.recv(4)))[0]
+
+print "receive length is %d" % recv_length
 
 original_area_dir = s.recv(64 * 4)
 
